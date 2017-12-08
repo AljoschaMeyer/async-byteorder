@@ -10,10 +10,10 @@ repository = "https://github.com/AljoschaMeyer/async-byteorder"
 [dependencies]
 tokio-io = "0.1.2"
 futures = "0.1.17"
-atm-io-utils = "0.1.0"
 
 [dev-dependencies]
 quickcheck = "0.4.1"
 partial-io = { version = "0.2.5", features = ["quickcheck", "tokio"] }
 rand = "0.3.18"
 async-ringbuffer = "0.1.0"
+atm-io-utils = "0.1.0"

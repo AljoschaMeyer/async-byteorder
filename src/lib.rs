@@ -16,8 +16,9 @@ extern crate async_ringbuffer;
 
 use std::mem::transmute;
 use std::io::Error;
+use std::io::ErrorKind::{UnexpectedEof, WriteZero};
 
-use futures::{Future, Async, Poll};
+use futures::{Future, Poll};
 use futures::Async::Ready;
 use tokio_io::{AsyncRead, AsyncWrite};
 
@@ -42,7 +43,15 @@ impl<R: AsyncRead> Future for ReadU32NativeOrder<R> {
     type Error = Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        unimplemented!()
+        while self.offset < 4 {
+            let read = retry_nb!(self.read.read(&mut self.bytes[self.offset as usize..]));
+            if read == 0 {
+                return Err(Error::new(UnexpectedEof, "failed to u32"));
+            }
+            self.offset += read as u8;
+        }
+
+        Ok(Ready(unsafe { transmute::<[u8; 4], u32>(self.bytes) }))
     }
 }
 
@@ -59,7 +68,7 @@ impl<R: AsyncRead> Future for ReadU32BE<R> {
     type Error = Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        Ok(Ready(try_ready!(self.0.poll()).to_be()))
+        Ok(Ready(u32::from_be(try_ready!(self.0.poll()))))
     }
 }
 
@@ -76,7 +85,7 @@ impl<R: AsyncRead> Future for ReadU32LE<R> {
     type Error = Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        Ok(Ready(try_ready!(self.0.poll()).to_le()))
+        Ok(Ready(u32::from_le(try_ready!(self.0.poll()))))
     }
 }
 
@@ -101,7 +110,15 @@ impl<W: AsyncWrite> Future for WriteU32NativeOrder<W> {
     type Error = Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        unimplemented!()
+        while self.offset < 4 {
+            let written = retry_nb!(self.write.write(&self.bytes[self.offset as usize..4]));
+            if written == 0 {
+                return Err(Error::new(WriteZero, "failed to write u32"));
+            }
+            self.offset += written as u8;
+        }
+
+        Ok(Ready(()))
     }
 }
 
@@ -143,8 +160,7 @@ impl<W: AsyncWrite> Future for WriteU32LE<W> {
 mod tests {
     use futures::Future;
     use rand;
-    use rand::Rng;
-    use partial_io::{PartialOp, PartialAsyncRead, PartialAsyncWrite, PartialWithErrors};
+    use partial_io::{PartialAsyncRead, PartialAsyncWrite, PartialWithErrors};
     use partial_io::quickcheck_types::GenInterruptedWouldBlock;
     use quickcheck::{QuickCheck, StdGen};
     use async_ringbuffer::*;
@@ -186,7 +202,9 @@ mod tests {
                        -> bool {
         let num = u32::MAX - 1;
 
-        let (mut w, mut r) = ring_buffer(buf_size + 1);
+        let (w, r) = ring_buffer(buf_size + 1);
+        let mut w = PartialAsyncWrite::new(w, write_ops);
+        let mut r = PartialAsyncRead::new(r, read_ops);
         let writer = WriteU32NativeOrder::new(num, &mut w);
         let reader = ReadU32NativeOrder::new(&mut r);
 
@@ -202,7 +220,9 @@ mod tests {
                    -> bool {
         let num = u32::MAX - 1;
 
-        let (mut w, mut r) = ring_buffer(buf_size + 1);
+        let (w, r) = ring_buffer(buf_size + 1);
+        let mut w = PartialAsyncWrite::new(w, write_ops);
+        let mut r = PartialAsyncRead::new(r, read_ops);
         let writer = WriteU32BE::new(num, &mut w);
         let reader = ReadU32BE::new(&mut r);
 
@@ -218,7 +238,9 @@ mod tests {
                    -> bool {
         let num = u32::MAX - 1;
 
-        let (mut w, mut r) = ring_buffer(buf_size + 1);
+        let (w, r) = ring_buffer(buf_size + 1);
+        let mut w = PartialAsyncWrite::new(w, write_ops);
+        let mut r = PartialAsyncRead::new(r, read_ops);
         let writer = WriteU32LE::new(num, &mut w);
         let reader = ReadU32LE::new(&mut r);
 

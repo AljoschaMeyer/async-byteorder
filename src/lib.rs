@@ -66,7 +66,7 @@ macro_rules! gen_byte_module {
         }
         
         /// Create a future to write a byte.
-        pub fn write_byte<W>(num: $num, writer: W) -> WriteByte<W> {
+        pub fn write_byte<W>(writer: W, num: $num) -> WriteByte<W> {
             WriteByte {
                 byte: unsafe { transmute::<$num, [u8; 1]>(num) },
                 writer: Some(writer),
@@ -219,7 +219,7 @@ macro_rules! gen_module {
         }
         
         /// Create a future to write a number in native byte order.
-        pub fn write_native<W>(num: $num, writer: W) -> WriteNative<W> {
+        pub fn write_native<W>(writer: W, num: $num) -> WriteNative<W> {
             WriteNative {
                 bytes: unsafe { transmute::<$num, [u8; $bytes]>(num) },
                 offset: 0,
@@ -270,8 +270,8 @@ macro_rules! gen_module {
         }
 
         /// Create a future to write a big-endian number.
-        pub fn write_be<W>(num: $num, writer: W) -> WriteBE<W> {
-            WriteBE(write_native(num.to_be(), writer))
+        pub fn write_be<W>(writer: W, num: $num) -> WriteBE<W> {
+            WriteBE(write_native(writer, num.to_be()))
         }
 
         /// Future to write a big-endian number to an `AsyncWrite`, created by
@@ -291,8 +291,8 @@ macro_rules! gen_module {
         }
 
         /// Create a future to write a little-endian number.
-        pub fn write_le<W>(num: $num, writer: W) -> WriteLE<W> {
-            WriteLE(write_native(num.to_le(), writer))
+        pub fn write_le<W>(writer: W, num: $num) -> WriteLE<W> {
+            WriteLE(write_native(writer, num.to_le()))
         }
 
         /// Future to write a little-endian number to an `AsyncWrite`, created by
@@ -455,10 +455,10 @@ mod tests {
                 let num = 2;
 
                 let (w, r) = ring_buffer(1);
-                let mut w = PartialAsyncWrite::new(w, write_ops);
-                let mut r = PartialAsyncRead::new(r, read_ops);
-                let writer = $write_byte(num, &mut w);
-                let reader = $read_byte(&mut r);
+                let w = PartialAsyncWrite::new(w, write_ops);
+                let r = PartialAsyncRead::new(r, read_ops);
+                let writer = $write_byte(w, num);
+                let reader = $read_byte(r);
 
                 let (_, (read, _)) = writer.join(reader).wait().unwrap();
                 assert_eq!(read, num);
@@ -504,10 +504,10 @@ mod tests {
                 let num = 2;
 
                 let (w, r) = ring_buffer(buf_size + 1);
-                let mut w = PartialAsyncWrite::new(w, write_ops);
-                let mut r = PartialAsyncRead::new(r, read_ops);
-                let writer = $write_native(num, &mut w);
-                let reader = $read_native(&mut r);
+                let w = PartialAsyncWrite::new(w, write_ops);
+                let r = PartialAsyncRead::new(r, read_ops);
+                let writer = $write_native(w, num);
+                let reader = $read_native(r);
 
                 let (_, (read, _)) = writer.join(reader).wait().unwrap();
                 assert_eq!(read, num);
@@ -522,10 +522,10 @@ mod tests {
                 let num = 2;
 
                 let (w, r) = ring_buffer(buf_size + 1);
-                let mut w = PartialAsyncWrite::new(w, write_ops);
-                let mut r = PartialAsyncRead::new(r, read_ops);
-                let writer = $write_be(num, &mut w);
-                let reader = $read_be(&mut r);
+                let w = PartialAsyncWrite::new(w, write_ops);
+                let r = PartialAsyncRead::new(r, read_ops);
+                let writer = $write_be(w, num);
+                let reader = $read_be(r);
 
                 let (_, (read, _)) = writer.join(reader).wait().unwrap();
                 assert_eq!(read, num);
@@ -540,10 +540,10 @@ mod tests {
                 let num = 2;
 
                 let (w, r) = ring_buffer(buf_size + 1);
-                let mut w = PartialAsyncWrite::new(w, write_ops);
-                let mut r = PartialAsyncRead::new(r, read_ops);
-                let writer = $write_le(num, &mut w);
-                let reader = $read_le(&mut r);
+                let w = PartialAsyncWrite::new(w, write_ops);
+                let r = PartialAsyncRead::new(r, read_ops);
+                let writer = $write_le(w, num);
+                let reader = $read_le(r);
 
                 let (_, (read, _)) = writer.join(reader).wait().unwrap();
                 assert_eq!(read, num);

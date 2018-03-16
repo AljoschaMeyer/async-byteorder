@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["AljoschaMeyer <mail@aljoscha-meyer.de>"]
 description = "Async encoders and decoders for the primitive number types, both big-endian and little-endian."
 readme = "README.md"
-license = "GPL-3.0"
+license = "AGPL-3.0"
 repository = "https://github.com/AljoschaMeyer/async-byteorder"
 
 [dependencies]

@@ -1,113 +1,97 @@
-#![warn(missing_docs)]
-#[macro_use]
-extern crate futures;
-extern crate tokio_io;
+//! Async encoders and decoders for the primitive number types, both big-endian and little-endian.
+#![deny(missing_docs)]
+
+extern crate async_codec;
+extern crate async_codec_util;
+#[macro_use(read_nz, write_nz)]
+extern crate atm_io_utils;
+extern crate futures_core;
+extern crate futures_io;
+
 
 #[cfg(test)]
+#[macro_use(quickcheck)]
 extern crate quickcheck;
-#[cfg(test)]
-extern crate partial_io;
-#[cfg(test)]
-extern crate rand;
 #[cfg(test)]
 extern crate async_ringbuffer;
 
 macro_rules! gen_byte_module {
-    ($num:ty) => (
-        use std::mem::transmute;
-        use std::io::Error;
-        use std::io::ErrorKind::{UnexpectedEof, WriteZero};
-        
-        use futures::{Future, Poll};
-        use futures::Async::Ready;
-        use tokio_io::{AsyncRead, AsyncWrite};
+    ($num:ty, $name:tt) => (
+        use std::marker::PhantomData;
 
-        /// Create a future to read a byte.
-        pub fn read_byte<R>(reader: R) -> ReadByte<R> {
-            ReadByte {reader: Some(reader)}
+        use async_codec::{AsyncDecode, DecodeError, AsyncEncode, AsyncEncodeLen};
+        use futures_core::{Poll, Never};
+        use futures_core::Async::Ready;
+        use futures_core::task::Context;
+        use futures_io::{AsyncRead, AsyncWrite, Error as FutIoErr};
+
+        #[doc = "Create a decoder for a `"]
+        #[doc = $name]
+        #[doc = "`."]
+        pub fn decode_byte<R>() -> DecodeByte<R> {
+            DecodeByte {_r: PhantomData}
         }
-        
-        /// Future to read a byte from an `AsyncRead`.
-        pub struct ReadByte<R> {
-            reader: Option<R>
+
+        #[doc = "Decode a `"]
+        #[doc = $name]
+        #[doc = "`."]
+        pub struct DecodeByte<R> {
+            _r: PhantomData<R>
         }
-        
-        impl<R: AsyncRead> Future for ReadByte<R> {
-            type Item = ($num, R);
-            type Error = Error;
 
-            /// Read a byte, retrying on `Interrupted` errors, and signaling
-            /// `WouldBlock` errors via `Async::NotReady`. Returns an
-            /// `UnexpectedEof` error if reading returns `Ok(0)`.
-            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-                let mut byte = [0u8; 1];
-                let mut reader = self.reader
-                    .take()
-                    .expect("Polled reader after completion");
+        impl<R: AsyncRead> AsyncDecode<R> for DecodeByte<R> {
+            type Item = $num;
+            type Error = Never;
 
-                loop {
-                    match reader.read(&mut byte) {
-                        Ok(read) => {
-                            if read == 0 {
-                                return Err(Error::new(UnexpectedEof, "failed to read number"));
-                            } else {
-                                return Ok(Ready((unsafe { transmute::<[u8; 1], $num>(byte) }, reader)))
-                            }
-                        }
-                        Err(ref e) if e.kind() == ::std::io::ErrorKind::WouldBlock => {
-                            self.reader = Some(reader);
-                            return Ok(::futures::Async::NotReady);
-                        }
-                        Err(ref e) if e.kind() == ::std::io::ErrorKind::Interrupted => {}
-                        Err(e) => return Err(e),
-                    }
+            fn poll_decode(
+                &mut self,
+                cx: &mut Context,
+                reader: &mut R
+            ) -> Poll<(Option<Self::Item>, usize), DecodeError<Self::Error>> {
+                let mut byte = [0];
+                read_nz!(reader.poll_read(cx, &mut byte), $name);
+                Ok(Ready((Some(byte[0] as $num), 1)))
+            }
+        }
+
+        #[doc = "Create an encoder for a `"]
+        #[doc = $name]
+        #[doc = "`."]
+        pub fn encode_byte<W>(num: $num) -> EncodeByte<W> {
+            EncodeByte {num: [num as u8], done: false, _w: PhantomData}
+        }
+
+        #[doc = "Encode a `"]
+        #[doc = $name]
+        #[doc = "`."]
+        pub struct EncodeByte<W> {
+            num: [u8; 1],
+            done: bool,
+            _w: PhantomData<W>
+        }
+
+        impl<W: AsyncWrite> AsyncEncode<W> for EncodeByte<W> {
+            fn poll_encode(
+                &mut self,
+                cx: &mut Context,
+                writer: &mut W
+            ) -> Poll<usize, FutIoErr> {
+                if self.done {
+                    Ok(Ready(0))
+                } else {
+                    write_nz!(writer.poll_write(cx, &self.num[..]), $name);
+                    self.done = true;
+                    Ok(Ready(1))
                 }
             }
         }
-        
-        /// Create a future to write a byte.
-        pub fn write_byte<W>(writer: W, num: $num) -> WriteByte<W> {
-            WriteByte {
-                byte: unsafe { transmute::<$num, [u8; 1]>(num) },
-                writer: Some(writer),
-            }
-        }
 
-        /// Future to write a byte to an `AsyncWrite`.
-        pub struct WriteByte<W> {
-            byte: [u8; 1],
-            writer: Option<W>,
-        }
-
-
-        impl<W: AsyncWrite> Future for WriteByte<W> {
-            type Item = W;
-            type Error = Error;
-
-            /// Write a byte, retrying on `Interrupted` errors, and signaling
-            /// `WouldBlock` errors via `Async::NotReady`. Returns a `WriteZero`
-            /// error if writing returns `Ok(0)`.
-            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-                let mut writer = self.writer
-                    .take()
-                    .expect("Polled writer after completion");
-
-                loop {
-                    match writer.write(&mut self.byte) {
-                        Ok(written) => {
-                            if written == 0 {
-                                return Err(Error::new(WriteZero, "failed to write number"));
-                            } else {
-                                return Ok(Ready(writer));
-                            }
-                        }
-                        Err(ref e) if e.kind() == ::std::io::ErrorKind::WouldBlock => {
-                            self.writer = Some(writer);
-                            return Ok(::futures::Async::NotReady);
-                        }
-                        Err(ref e) if e.kind() == ::std::io::ErrorKind::Interrupted => {}
-                        Err(e) => return Err(e),
-                    }
+        impl<W: AsyncWrite> AsyncEncodeLen<W> for EncodeByte<W> {
+            fn remaining_bytes(&self) -> usize {
+                if self.done {
+                    0
+                } else {
+                    1
                 }
             }
         }
@@ -115,489 +99,424 @@ macro_rules! gen_byte_module {
 }
 
 macro_rules! gen_module {
-    ($num:ty, $bytes:expr, $from_be:path, $from_le:path) => (
+    ($num:ty, $name:tt,  $bytes:expr, $from_be:path, $from_le:path) => (
         use std::mem::transmute;
-        use std::io::Error;
-        use std::io::ErrorKind::{UnexpectedEof, WriteZero};
+        use std::marker::PhantomData;
 
-        use futures::{Future, Poll};
-        use futures::Async::Ready;
-        use tokio_io::{AsyncRead, AsyncWrite};
-        
-        /// Create a future to read a number in native byte order.
-        pub fn read_native<R>(reader: R) -> ReadNative<R> {
-            ReadNative {
+        use async_codec::{AsyncDecode, DecodeError, AsyncEncode, AsyncEncodeLen};
+        use async_codec_util::decoder::{map, Map};
+        use futures_core::{Poll, Never};
+        use futures_core::Async::Ready;
+        use futures_core::task::Context;
+        use futures_io::{AsyncRead, AsyncWrite, Error as FutIoErr};
+
+        #[doc = "Create a decoder for a `"]
+        #[doc = $name]
+        #[doc = "` in native byte order."]
+        pub fn decode_native<R>() -> DecodeNative<R> {
+            DecodeNative {
                 bytes: [0; $bytes],
                 offset: 0,
-                reader: Some(reader)
+                _r: PhantomData,
             }
         }
-        
-        /// Future to read a number in native byte order from an `AsyncRead`,
-        /// created by the corresponding `read_xyz_native` function.
-        pub struct ReadNative<R> {
+
+        #[doc = "Decode a `"]
+        #[doc = $name]
+        #[doc = "` in native byte order."]
+        pub struct DecodeNative<R> {
             bytes: [u8; $bytes],
             offset: u8,
-            reader: Option<R>
+            _r: PhantomData<R>
         }
-        
-        impl<R: AsyncRead> Future for ReadNative<R> {
-            type Item = ($num, R);
-            type Error = Error;
 
-            /// Read a number in native byte order, retrying on `Interrupted`
-            /// errors, and signaling `WouldBlock` errors via `Async::NotReady`.
-            /// Returns an `UnexpectedEof` error if reading returns `Ok(0)`.
-            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-                let mut reader = self.reader
-                    .take()
-                    .expect("Polled reader after completion");
+        impl<R: AsyncRead> AsyncDecode<R> for DecodeNative<R> {
+            type Item = $num;
+            type Error = Never;
 
-                while self.offset < $bytes {
-                    match reader.read(&mut self.bytes[self.offset as usize..]) {
-                        Ok(read) => {
-                            if read == 0 {
-                                return Err(Error::new(UnexpectedEof, "failed to read number"));
-                            }
-                            self.offset += read as u8;
-                        }
-                        Err(ref e) if e.kind() == ::std::io::ErrorKind::WouldBlock => {
-                            self.reader = Some(reader);
-                            return Ok(::futures::Async::NotReady);
-                        }
-                        Err(ref e) if e.kind() == ::std::io::ErrorKind::Interrupted => {}
-                        Err(e) => return Err(e),
-                    }
+            fn poll_decode(
+                &mut self,
+                cx: &mut Context,
+                reader: &mut R
+            ) -> Poll<(Option<Self::Item>, usize), DecodeError<Self::Error>> {
+                let read = read_nz!(reader.poll_read(cx, &mut self.bytes[self.offset as usize..]), $name);
+                self.offset += read as u8;
+
+                if self.offset < $bytes {
+                    Ok(Ready((None, read)))
+                } else {
+                    Ok(Ready((Some(unsafe { transmute::<[u8; $bytes], $num>(self.bytes) }), read)))
                 }
-
-                Ok(Ready((unsafe { transmute::<[u8; $bytes], $num>(self.bytes) }, reader)))
             }
         }
-        
-        /// Create a future to read a big-endian number.
-        pub fn read_be<R>(reader: R) -> ReadBE<R> {
-            ReadBE(read_native(reader))
+
+        #[doc = "Create a decoder for a `"]
+        #[doc = $name]
+        #[doc = "` in big-endian byte order."]
+        pub fn decode_be<R>() -> DecodeBE<R> {
+            DecodeBE(map(decode_native(), $from_be))
         }
 
-        /// Future to read a big-endian number from an `AsyncRead`, created by
-        /// the corresponding `read_xyz_be` function.
-        pub struct ReadBE<R>(ReadNative<R>);
+        #[doc = "Decode a `"]
+        #[doc = $name]
+        #[doc = "` in big-endian byte order."]
+        pub struct DecodeBE<R>(Map<R, DecodeNative<R>, fn($num) -> $num>);
 
-        impl<R: AsyncRead> Future for ReadBE<R> {
-            type Item = ($num, R);
-            type Error = Error;
+        impl<R: AsyncRead> AsyncDecode<R> for DecodeBE<R> {
+            type Item = $num;
+            type Error = Never;
 
-            /// Read a big-endian number, retrying on `Interrupted` errors, and signaling
-            /// `WouldBlock` errors via `Async::NotReady`. Returns an `UnexpectedEof`
-            /// error if reading returns `Ok(0)`.
-            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-                let (num, reader) = try_ready!(self.0.poll());
-                Ok(Ready(($from_be(num), reader)))
+            fn poll_decode(
+                &mut self,
+                cx: &mut Context,
+                reader: &mut R
+            ) -> Poll<(Option<Self::Item>, usize), DecodeError<Self::Error>> {
+                self.0.poll_decode(cx, reader)
             }
         }
-        
-        /// Create a future to read a little-endian number.
-        pub fn read_le<R>(reader: R) -> ReadLE<R> {
-            ReadLE(read_native(reader))
+
+        #[doc = "Create a decoder for a `"]
+        #[doc = $name]
+        #[doc = "` in little-endian byte order."]
+        pub fn decode_le<R>() -> DecodeLE<R> {
+            DecodeLE(map(decode_native(), $from_le))
         }
 
-        /// Future to read a little-endian number from an `AsyncRead`, created by
-        /// the corresponding `read_xyz_le` function.
-        pub struct ReadLE<R>(ReadNative<R>);
+        #[doc = "Decode a `"]
+        #[doc = $name]
+        #[doc = "` in little-endian byte order."]
+        pub struct DecodeLE<R>(Map<R, DecodeNative<R>, fn($num) -> $num>);
 
-        impl<R: AsyncRead> Future for ReadLE<R> {
-            type Item = ($num, R);
-            type Error = Error;
+        impl<R: AsyncRead> AsyncDecode<R> for DecodeLE<R> {
+            type Item = $num;
+            type Error = Never;
 
-            /// Read a little-endian number, retrying on `Interrupted` errors, and signaling
-            /// `WouldBlock` errors via `Async::NotReady`. Returns an `UnexpectedEof`
-            /// error if reading returns `Ok(0)`.
-            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-                let (num, reader) = try_ready!(self.0.poll());
-                Ok(Ready(($from_le(num), reader)))
+            fn poll_decode(
+                &mut self,
+                cx: &mut Context,
+                reader: &mut R
+            ) -> Poll<(Option<Self::Item>, usize), DecodeError<Self::Error>> {
+                self.0.poll_decode(cx, reader)
             }
         }
-        
-        /// Create a future to write a number in native byte order.
-        pub fn write_native<W>(writer: W, num: $num) -> WriteNative<W> {
-            WriteNative {
+
+        #[doc = "Create an encoder for a `"]
+        #[doc = $name]
+        #[doc = "` in native byte order."]
+        pub fn encode_native<W>(num: $num) -> EncodeNative<W> {
+            EncodeNative {
                 bytes: unsafe { transmute::<$num, [u8; $bytes]>(num) },
                 offset: 0,
-                writer: Some(writer),
+                _w: PhantomData,
             }
         }
 
-        /// Future to write a number in native byte order to an `AsyncWrite`, created by
-        /// the corresponding `write_xyz_native` function.
-        pub struct WriteNative<W> {
+        #[doc = "Encode a `"]
+        #[doc = $name]
+        #[doc = "` in native byte order."]
+        pub struct EncodeNative<W> {
             bytes: [u8; $bytes],
             offset: u8,
-            writer: Option<W>,
+            _w: PhantomData<W>
         }
 
-
-        impl<W: AsyncWrite> Future for WriteNative<W> {
-            type Item = W;
-            type Error = Error;
-
-            /// Write a number in native byte order, retrying on `Interrupted`
-            /// errors, and signaling `WouldBlock` errors via `Async::NotReady`.
-            /// Returns a `WriteZero` error if writing returns `Ok(0)`.
-            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-                let mut writer = self.writer
-                    .take()
-                    .expect("Polled writer after completion");
-
-                while self.offset < $bytes {
-                    match writer.write(&mut self.bytes[self.offset as usize..]) {
-                        Ok(written) => {
-                            if written == 0 {
-                                return Err(Error::new(WriteZero, "failed to write number"));
-                            }
-                            self.offset += written as u8;
-                        }
-                        Err(ref e) if e.kind() == ::std::io::ErrorKind::WouldBlock => {
-                            self.writer = Some(writer);
-                            return Ok(::futures::Async::NotReady);
-                        }
-                        Err(ref e) if e.kind() == ::std::io::ErrorKind::Interrupted => {}
-                        Err(e) => return Err(e),
-                    }
+        impl<W: AsyncWrite> AsyncEncode<W> for EncodeNative<W> {
+            fn poll_encode(
+                &mut self,
+                cx: &mut Context,
+                writer: &mut W
+            ) -> Poll<usize, FutIoErr> {
+                if self.offset < $bytes {
+                    let written = write_nz!(writer.poll_write(cx, &mut self.bytes[self.offset as usize..]), $name);
+                    self.offset += written as u8;
+                    Ok(Ready(written))
+                } else {
+                    Ok(Ready(0))
                 }
-
-                Ok(Ready(writer))
             }
         }
 
-        /// Create a future to write a big-endian number.
-        pub fn write_be<W>(writer: W, num: $num) -> WriteBE<W> {
-            WriteBE(write_native(writer, num.to_be()))
-        }
-
-        /// Future to write a big-endian number to an `AsyncWrite`, created by
-        /// the corresponding `write_xyz_be` function.
-        pub struct WriteBE<W>(WriteNative<W>);
-
-        impl<W: AsyncWrite> Future for WriteBE<W> {
-            type Item = W;
-            type Error = Error;
-
-            /// Write a big-endian numer, retrying on `Interrupted` errors, and signaling
-            /// `WouldBlock` errors via `Async::NotReady`. Returns a `WriteZero` error
-            /// if writing returns `Ok(0)`.
-            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-                self.0.poll()
+        impl<W: AsyncWrite> AsyncEncodeLen<W> for EncodeNative<W> {
+            fn remaining_bytes(&self) -> usize {
+                ($bytes - self.offset) as usize
             }
         }
 
-        /// Create a future to write a little-endian number.
-        pub fn write_le<W>(writer: W, num: $num) -> WriteLE<W> {
-            WriteLE(write_native(writer, num.to_le()))
+        #[doc = "Create an encoder for a `"]
+        #[doc = $name]
+        #[doc = "` in big-endian byte order."]
+        pub fn encode_be<W>(num: $num) -> EncodeBE<W> {
+            EncodeBE(encode_native(num.to_be()))
         }
 
-        /// Future to write a little-endian number to an `AsyncWrite`, created by
-        /// the corresponding `write_le` function.
-        pub struct WriteLE<W>(WriteNative<W>);
+        #[doc = "Encode a `"]
+        #[doc = $name]
+        #[doc = "` in big-endian byte order."]
+        pub struct EncodeBE<W>(EncodeNative<W>);
 
-        impl<W: AsyncWrite> Future for WriteLE<W> {
-            type Item = W;
-            type Error = Error;
+        impl<W: AsyncWrite> AsyncEncode<W> for EncodeBE<W> {
+            fn poll_encode(
+                &mut self,
+                cx: &mut Context,
+                writer: &mut W
+            ) -> Poll<usize, FutIoErr> {
+                self.0.poll_encode(cx, writer)
+            }
+        }
 
-            /// Write a little-endian number, retrying on `Interrupted` errors, and signaling
-            /// `WouldBlock` errors via `Async::NotReady`. Returns a `WriteZero` error
-            /// if writing returns `Ok(0)`.
-            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-                self.0.poll()
+        impl<W: AsyncWrite> AsyncEncodeLen<W> for EncodeBE<W> {
+            fn remaining_bytes(&self) -> usize {
+                self.0.remaining_bytes()
+            }
+        }
+
+        #[doc = "Create an encoder for a `"]
+        #[doc = $name]
+        #[doc = "` in little-endian byte order."]
+        pub fn encode_le<W>(num: $num) -> EncodeLE<W> {
+            EncodeLE(encode_native(num.to_le()))
+        }
+
+        #[doc = "Encode a `"]
+        #[doc = $name]
+        #[doc = "` in little-endian byte order."]
+        pub struct EncodeLE<W>(EncodeNative<W>);
+
+        impl<W: AsyncWrite> AsyncEncode<W> for EncodeLE<W> {
+            fn poll_encode(
+                &mut self,
+                cx: &mut Context,
+                writer: &mut W
+            ) -> Poll<usize, FutIoErr> {
+                self.0.poll_encode(cx, writer)
+            }
+        }
+
+        impl<W: AsyncWrite> AsyncEncodeLen<W> for EncodeLE<W> {
+            fn remaining_bytes(&self) -> usize {
+                self.0.remaining_bytes()
             }
         }
     )
 }
 
 mod mod_u8 {
-    gen_byte_module!{u8}
+    gen_byte_module!{u8, "u8"}
 }
-pub use self::mod_u8::read_byte as read_u8;
-pub use self::mod_u8::ReadByte as ReadU8;
-pub use self::mod_u8::write_byte as write_u8;
-pub use self::mod_u8::WriteByte as WriteU8;
+pub use self::mod_u8::decode_byte as decode_u8;
+pub use self::mod_u8::DecodeByte as DecodeU8;
+pub use self::mod_u8::encode_byte as encode_u8;
+pub use self::mod_u8::EncodeByte as EncodeU8;
 
 mod mod_i8 {
-    gen_byte_module!{i8}
+    gen_byte_module!{i8, "i8"}
 }
-pub use self::mod_i8::read_byte as read_i8;
-pub use self::mod_i8::ReadByte as ReadI8;
-pub use self::mod_i8::write_byte as write_i8;
-pub use self::mod_i8::WriteByte as WriteI8;
+pub use self::mod_i8::decode_byte as decode_i8;
+pub use self::mod_i8::DecodeByte as DecodeI8;
+pub use self::mod_i8::encode_byte as encode_i8;
+pub use self::mod_i8::EncodeByte as EncodeI8;
 
 mod mod_u16 {
-    gen_module!{u16, 2, u16::from_be, u16::from_le}
+    gen_module!{u16, "u16", 2, u16::from_be, u16::from_le}
 }
-pub use self::mod_u16::read_native as read_u16_native;
-pub use self::mod_u16::ReadNative as ReadU16Native;
-pub use self::mod_u16::read_be as read_u16_be;
-pub use self::mod_u16::ReadBE as ReadU16BE;
-pub use self::mod_u16::read_le as read_u16_le;
-pub use self::mod_u16::ReadLE as ReadU16LE;
-pub use self::mod_u16::write_native as write_u16_native;
-pub use self::mod_u16::WriteNative as WriteU16Native;
-pub use self::mod_u16::write_be as write_u16_be;
-pub use self::mod_u16::WriteBE as WriteU16BE;
-pub use self::mod_u16::write_le as write_u16_le;
-pub use self::mod_u16::WriteLE as WriteU16LE;
+pub use self::mod_u16::decode_native as decode_u16_native;
+pub use self::mod_u16::DecodeNative as DecodeU16Native;
+pub use self::mod_u16::decode_be as decode_u16_be;
+pub use self::mod_u16::DecodeBE as DecodeU16BE;
+pub use self::mod_u16::decode_le as decode_u16_le;
+pub use self::mod_u16::DecodeLE as DecodeU16LE;
+pub use self::mod_u16::encode_native as encode_u16_native;
+pub use self::mod_u16::EncodeNative as EncodeU16Native;
+pub use self::mod_u16::encode_be as encode_u16_be;
+pub use self::mod_u16::EncodeBE as EncodeU16BE;
+pub use self::mod_u16::encode_le as encode_u16_le;
+pub use self::mod_u16::EncodeLE as EncodeU16LE;
 
 mod mod_u32 {
-    gen_module!{u32, 4, u32::from_be, u32::from_le}
+    gen_module!{u32, "u32", 4, u32::from_be, u32::from_le}
 }
-pub use self::mod_u32::read_native as read_u32_native;
-pub use self::mod_u32::ReadNative as ReadU32Native;
-pub use self::mod_u32::read_be as read_u32_be;
-pub use self::mod_u32::ReadBE as ReadU32BE;
-pub use self::mod_u32::read_le as read_u32_le;
-pub use self::mod_u32::ReadLE as ReadU32LE;
-pub use self::mod_u32::write_native as write_u32_native;
-pub use self::mod_u32::WriteNative as WriteU32Native;
-pub use self::mod_u32::write_be as write_u32_be;
-pub use self::mod_u32::WriteBE as WriteU32BE;
-pub use self::mod_u32::write_le as write_u32_le;
-pub use self::mod_u32::WriteLE as WriteU32LE;
+pub use self::mod_u32::decode_native as decode_u32_native;
+pub use self::mod_u32::DecodeNative as DecodeU32Native;
+pub use self::mod_u32::decode_be as decode_u32_be;
+pub use self::mod_u32::DecodeBE as DecodeU32BE;
+pub use self::mod_u32::decode_le as decode_u32_le;
+pub use self::mod_u32::DecodeLE as DecodeU32LE;
+pub use self::mod_u32::encode_native as encode_u32_native;
+pub use self::mod_u32::EncodeNative as EncodeU32Native;
+pub use self::mod_u32::encode_be as encode_u32_be;
+pub use self::mod_u32::EncodeBE as EncodeU32BE;
+pub use self::mod_u32::encode_le as encode_u32_le;
+pub use self::mod_u32::EncodeLE as EncodeU32LE;
 
 mod mod_u64 {
-    gen_module!{u64, 8, u64::from_be, u64::from_le}
+    gen_module!{u64, "u64", 8, u64::from_be, u64::from_le}
 }
-pub use self::mod_u64::read_native as read_u64_native;
-pub use self::mod_u64::ReadNative as ReadU64Native;
-pub use self::mod_u64::read_be as read_u64_be;
-pub use self::mod_u64::ReadBE as ReadU64BE;
-pub use self::mod_u64::read_le as read_u64_le;
-pub use self::mod_u64::ReadLE as ReadU64LE;
-pub use self::mod_u64::write_native as write_u64_native;
-pub use self::mod_u64::WriteNative as WriteU64Native;
-pub use self::mod_u64::write_be as write_u64_be;
-pub use self::mod_u64::WriteBE as WriteU64BE;
-pub use self::mod_u64::write_le as write_u64_le;
-pub use self::mod_u64::WriteLE as WriteU64LE;
+pub use self::mod_u64::decode_native as decode_u64_native;
+pub use self::mod_u64::DecodeNative as DecodeU64Native;
+pub use self::mod_u64::decode_be as decode_u64_be;
+pub use self::mod_u64::DecodeBE as DecodeU64BE;
+pub use self::mod_u64::decode_le as decode_u64_le;
+pub use self::mod_u64::DecodeLE as DecodeU64LE;
+pub use self::mod_u64::encode_native as encode_u64_native;
+pub use self::mod_u64::EncodeNative as EncodeU64Native;
+pub use self::mod_u64::encode_be as encode_u64_be;
+pub use self::mod_u64::EncodeBE as EncodeU64BE;
+pub use self::mod_u64::encode_le as encode_u64_le;
+pub use self::mod_u64::EncodeLE as EncodeU64LE;
 
 mod mod_i16 {
-    gen_module!{i16, 2, i16::from_be, i16::from_le}
+    gen_module!{i16, "i16", 2, i16::from_be, i16::from_le}
 }
-pub use self::mod_i16::read_native as read_i16_native;
-pub use self::mod_i16::ReadNative as ReadI16Native;
-pub use self::mod_i16::read_be as read_i16_be;
-pub use self::mod_i16::ReadBE as ReadI16BE;
-pub use self::mod_i16::read_le as read_i16_le;
-pub use self::mod_i16::ReadLE as ReadI16LE;
-pub use self::mod_i16::write_native as write_i16_native;
-pub use self::mod_i16::WriteNative as WriteI16Native;
-pub use self::mod_i16::write_be as write_i16_be;
-pub use self::mod_i16::WriteBE as WriteI16BE;
-pub use self::mod_i16::write_le as write_i16_le;
-pub use self::mod_i16::WriteLE as WriteI16LE;
+pub use self::mod_i16::decode_native as decode_i16_native;
+pub use self::mod_i16::DecodeNative as DecodeI16Native;
+pub use self::mod_i16::decode_be as decode_i16_be;
+pub use self::mod_i16::DecodeBE as DecodeI16BE;
+pub use self::mod_i16::decode_le as decode_i16_le;
+pub use self::mod_i16::DecodeLE as DecodeI16LE;
+pub use self::mod_i16::encode_native as encode_i16_native;
+pub use self::mod_i16::EncodeNative as EncodeI16Native;
+pub use self::mod_i16::encode_be as encode_i16_be;
+pub use self::mod_i16::EncodeBE as EncodeI16BE;
+pub use self::mod_i16::encode_le as encode_i16_le;
+pub use self::mod_i16::EncodeLE as EncodeI16LE;
 
 mod mod_i32 {
-    gen_module!{i32, 4, i32::from_be, i32::from_le}
+    gen_module!{i32, "i32", 4, i32::from_be, i32::from_le}
 }
-pub use self::mod_i32::read_native as read_i32_native;
-pub use self::mod_i32::ReadNative as ReadI32Native;
-pub use self::mod_i32::read_be as read_i32_be;
-pub use self::mod_i32::ReadBE as ReadI32BE;
-pub use self::mod_i32::read_le as read_i32_le;
-pub use self::mod_i32::ReadLE as ReadI32LE;
-pub use self::mod_i32::write_native as write_i32_native;
-pub use self::mod_i32::WriteNative as WriteI32Native;
-pub use self::mod_i32::write_be as write_i32_be;
-pub use self::mod_i32::WriteBE as WriteI32BE;
-pub use self::mod_i32::write_le as write_i32_le;
-pub use self::mod_i32::WriteLE as WriteI32LE;
+pub use self::mod_i32::decode_native as decode_i32_native;
+pub use self::mod_i32::DecodeNative as DecodeI32Native;
+pub use self::mod_i32::decode_be as decode_i32_be;
+pub use self::mod_i32::DecodeBE as DecodeI32BE;
+pub use self::mod_i32::decode_le as decode_i32_le;
+pub use self::mod_i32::DecodeLE as DecodeI32LE;
+pub use self::mod_i32::encode_native as encode_i32_native;
+pub use self::mod_i32::EncodeNative as EncodeI32Native;
+pub use self::mod_i32::encode_be as encode_i32_be;
+pub use self::mod_i32::EncodeBE as EncodeI32BE;
+pub use self::mod_i32::encode_le as encode_i32_le;
+pub use self::mod_i32::EncodeLE as EncodeI32LE;
 
 mod mod_i64 {
-    gen_module!{i64, 8, i64::from_be, i64::from_le}
+    gen_module!{i64, "i64", 8, i64::from_be, i64::from_le}
 }
-pub use self::mod_i64::read_native as read_i64_native;
-pub use self::mod_i64::ReadNative as ReadI64Native;
-pub use self::mod_i64::read_be as read_i64_be;
-pub use self::mod_i64::ReadBE as ReadI64BE;
-pub use self::mod_i64::read_le as read_i64_le;
-pub use self::mod_i64::ReadLE as ReadI64LE;
-pub use self::mod_i64::write_native as write_i64_native;
-pub use self::mod_i64::WriteNative as WriteI64Native;
-pub use self::mod_i64::write_be as write_i64_be;
-pub use self::mod_i64::WriteBE as WriteI64BE;
-pub use self::mod_i64::write_le as write_i64_le;
-pub use self::mod_i64::WriteLE as WriteI64LE;
+pub use self::mod_i64::decode_native as decode_i64_native;
+pub use self::mod_i64::DecodeNative as DecodeI64Native;
+pub use self::mod_i64::decode_be as decode_i64_be;
+pub use self::mod_i64::DecodeBE as DecodeI64BE;
+pub use self::mod_i64::decode_le as decode_i64_le;
+pub use self::mod_i64::DecodeLE as DecodeI64LE;
+pub use self::mod_i64::encode_native as encode_i64_native;
+pub use self::mod_i64::EncodeNative as EncodeI64Native;
+pub use self::mod_i64::encode_be as encode_i64_be;
+pub use self::mod_i64::EncodeBE as EncodeI64BE;
+pub use self::mod_i64::encode_le as encode_i64_le;
+pub use self::mod_i64::EncodeLE as EncodeI64LE;
 
 #[cfg(test)]
 mod tests {
-    use rand;
-    use partial_io::{PartialAsyncRead, PartialAsyncWrite, PartialWithErrors};
-    use partial_io::quickcheck_types::GenInterruptedWouldBlock;
-    use quickcheck::{QuickCheck, StdGen};
-    use async_ringbuffer::*;
+    use atm_io_utils::partial::*;
+    use async_codec_util::testing::test_codec_len;
+    use async_ringbuffer::ring_buffer;
 
     use super::*;
 
-    use std::u32;
-
     macro_rules! gen_byte_test {
-        ($read_byte:expr, $write_byte:expr) => (
-            #[test]
-            fn test() {
-                let rng = StdGen::new(rand::thread_rng(), 12);
-                let mut quickcheck = QuickCheck::new().gen(rng).tests(10000);
-                quickcheck.quickcheck(test_byte as
-                                      fn(PartialWithErrors<GenInterruptedWouldBlock>,
-                                         PartialWithErrors<GenInterruptedWouldBlock>)
-                                         -> bool);
-            }
-            
-            fn test_byte(write_ops: PartialWithErrors<GenInterruptedWouldBlock>,
-                               read_ops: PartialWithErrors<GenInterruptedWouldBlock>)
-                               -> bool {
-                let num = 2;
+        ($num:ty, $decode_byte:expr, $encode_byte:expr) => (
+            quickcheck! {
+                fn test(buf_size: usize, read_ops: Vec<PartialOp>, write_ops: Vec<PartialOp>, num: $num) -> bool {
+                    let mut read_ops = read_ops;
+                    let mut write_ops = write_ops;
+                    let (w, r) = ring_buffer(buf_size + 1);
+                    let w = PartialWrite::new(w, write_ops.drain(..));
+                    let r = PartialRead::new(r, read_ops.drain(..));
 
-                let (w, r) = ring_buffer(1);
-                let w = PartialAsyncWrite::new(w, write_ops);
-                let r = PartialAsyncRead::new(r, read_ops);
-                let writer = $write_byte(w, num);
-                let reader = $read_byte(r);
-
-                let (_, (read, _)) = writer.join(reader).wait().unwrap();
-                assert_eq!(read, num);
-
-                return true;
+                    let test_outcome = test_codec_len(r, w, $decode_byte(), $encode_byte(num));
+                    test_outcome.1 && test_outcome.0 == num
+                }
             }
         );
     }
 
     macro_rules! gen_test {
-        ($read_native:expr, $write_native:expr, $read_be:expr, $write_be:expr, $read_le:expr, $write_le:expr) => (
-            #[test]
-            fn test() {
-                let rng = StdGen::new(rand::thread_rng(), 12);
-                let mut quickcheck = QuickCheck::new().gen(rng).tests(10000);
-                quickcheck.quickcheck(test_native as
-                                      fn(usize,
-                                         PartialWithErrors<GenInterruptedWouldBlock>,
-                                         PartialWithErrors<GenInterruptedWouldBlock>)
-                                         -> bool);
-                                         
-                 let rng = StdGen::new(rand::thread_rng(), 12);
-                 let mut quickcheck = QuickCheck::new().gen(rng).tests(10000);
-                 quickcheck.quickcheck(test_be as
-                                       fn(usize,
-                                          PartialWithErrors<GenInterruptedWouldBlock>,
-                                          PartialWithErrors<GenInterruptedWouldBlock>)
-                                          -> bool);
-                                          
-                  let rng = StdGen::new(rand::thread_rng(), 12);
-                  let mut quickcheck = QuickCheck::new().gen(rng).tests(10000);
-                  quickcheck.quickcheck(test_le as
-                                        fn(usize,
-                                           PartialWithErrors<GenInterruptedWouldBlock>,
-                                           PartialWithErrors<GenInterruptedWouldBlock>)
-                                           -> bool);
+        ($num: ty, $decode_native:expr, $encode_native:expr, $decode_be:expr, $encode_be:expr, $decode_le:expr, $encode_le:expr) => (
+            quickcheck! {
+                fn native(buf_size: usize, read_ops: Vec<PartialOp>, write_ops: Vec<PartialOp>, num: $num) -> bool {
+                    let mut read_ops = read_ops;
+                    let mut write_ops = write_ops;
+                    let (w, r) = ring_buffer(buf_size + 1);
+                    let w = PartialWrite::new(w, write_ops.drain(..));
+                    let r = PartialRead::new(r, read_ops.drain(..));
+
+                    let test_outcome = test_codec_len(r, w, $decode_native(), $encode_native(num));
+                    test_outcome.1 && test_outcome.0 == num
+                }
             }
 
-            fn test_native(buf_size: usize,
-                               write_ops: PartialWithErrors<GenInterruptedWouldBlock>,
-                               read_ops: PartialWithErrors<GenInterruptedWouldBlock>)
-                               -> bool {
-                let num = 2;
+            quickcheck! {
+                fn be(buf_size: usize, read_ops: Vec<PartialOp>, write_ops: Vec<PartialOp>, num: $num) -> bool {
+                    let mut read_ops = read_ops;
+                    let mut write_ops = write_ops;
+                    let (w, r) = ring_buffer(buf_size + 1);
+                    let w = PartialWrite::new(w, write_ops.drain(..));
+                    let r = PartialRead::new(r, read_ops.drain(..));
 
-                let (w, r) = ring_buffer(buf_size + 1);
-                let w = PartialAsyncWrite::new(w, write_ops);
-                let r = PartialAsyncRead::new(r, read_ops);
-                let writer = $write_native(w, num);
-                let reader = $read_native(r);
-
-                let (_, (read, _)) = writer.join(reader).wait().unwrap();
-                assert_eq!(read, num);
-
-                return true;
+                    let test_outcome = test_codec_len(r, w, $decode_be(), $encode_be(num));
+                    test_outcome.1 && test_outcome.0 == num
+                }
             }
-            
-            fn test_be(buf_size: usize,
-                               write_ops: PartialWithErrors<GenInterruptedWouldBlock>,
-                               read_ops: PartialWithErrors<GenInterruptedWouldBlock>)
-                               -> bool {
-                let num = 2;
 
-                let (w, r) = ring_buffer(buf_size + 1);
-                let w = PartialAsyncWrite::new(w, write_ops);
-                let r = PartialAsyncRead::new(r, read_ops);
-                let writer = $write_be(w, num);
-                let reader = $read_be(r);
+            quickcheck! {
+                fn le(buf_size: usize, read_ops: Vec<PartialOp>, write_ops: Vec<PartialOp>, num: $num) -> bool {
+                    let mut read_ops = read_ops;
+                    let mut write_ops = write_ops;
+                    let (w, r) = ring_buffer(buf_size + 1);
+                    let w = PartialWrite::new(w, write_ops.drain(..));
+                    let r = PartialRead::new(r, read_ops.drain(..));
 
-                let (_, (read, _)) = writer.join(reader).wait().unwrap();
-                assert_eq!(read, num);
-
-                return true;
-            }
-            
-            fn test_le(buf_size: usize,
-                               write_ops: PartialWithErrors<GenInterruptedWouldBlock>,
-                               read_ops: PartialWithErrors<GenInterruptedWouldBlock>)
-                               -> bool {
-                let num = 2;
-
-                let (w, r) = ring_buffer(buf_size + 1);
-                let w = PartialAsyncWrite::new(w, write_ops);
-                let r = PartialAsyncRead::new(r, read_ops);
-                let writer = $write_le(w, num);
-                let reader = $read_le(r);
-
-                let (_, (read, _)) = writer.join(reader).wait().unwrap();
-                assert_eq!(read, num);
-
-                return true;
+                    let test_outcome = test_codec_len(r, w, $decode_le(), $encode_le(num));
+                    test_outcome.1 && test_outcome.0 == num
+                }
             }
         )
     }
 
     mod test_u8 {
         use super::*;
-        use futures::Future;
-        gen_byte_test!{read_u8, write_u8}
+        gen_byte_test!{u8, decode_u8, encode_u8}
     }
 
     mod test_i8 {
         use super::*;
-        use futures::Future;
-        gen_byte_test!{read_i8, write_i8}
+        gen_byte_test!{i8, decode_i8, encode_i8}
     }
 
     mod test_u16 {
         use super::*;
-        use futures::Future;
-        gen_test!{read_u16_native, write_u16_native, read_u16_be, write_u16_be, read_u16_le, write_u16_le}
+        gen_test!{u16, decode_u16_native, encode_u16_native, decode_u16_be, encode_u16_be, decode_u16_le, encode_u16_le}
     }
 
     mod test_u32 {
         use super::*;
-        use futures::Future;
-        gen_test!{read_u32_native, write_u32_native, read_u32_be, write_u32_be, read_u32_le, write_u32_le}
+        gen_test!{u32, decode_u32_native, encode_u32_native, decode_u32_be, encode_u32_be, decode_u32_le, encode_u32_le}
     }
 
     mod test_u64 {
         use super::*;
-        use futures::Future;
-        gen_test!{read_u64_native, write_u64_native, read_u64_be, write_u64_be, read_u64_le, write_u64_le}
+        gen_test!{u64, decode_u64_native, encode_u64_native, decode_u64_be, encode_u64_be, decode_u64_le, encode_u64_le}
     }
 
     mod test_i16 {
         use super::*;
-        use futures::Future;
-        gen_test!{read_i16_native, write_i16_native, read_i16_be, write_i16_be, read_i16_le, write_i16_le}
+        gen_test!{i16, decode_i16_native, encode_i16_native, decode_i16_be, encode_i16_be, decode_i16_le, encode_i16_le}
     }
 
     mod test_i32 {
         use super::*;
-        use futures::Future;
-        gen_test!{read_i32_native, write_i32_native, read_i32_be, write_i32_be, read_i32_le, write_i32_le}
+        gen_test!{i32, decode_i32_native, encode_i32_native, decode_i32_be, encode_i32_be, decode_i32_le, encode_i32_le}
     }
 
     mod test_i64 {
         use super::*;
-        use futures::Future;
-        gen_test!{read_i64_native, write_i64_native, read_i64_be, write_i64_be, read_i64_le, write_i64_le}
+        gen_test!{i64, decode_i64_native, encode_i64_native, decode_i64_be, encode_i64_be, decode_i64_le, encode_i64_le}
     }
 }

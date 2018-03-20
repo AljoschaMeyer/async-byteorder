@@ -3,7 +3,6 @@
 
 extern crate async_codec;
 extern crate async_codec_util;
-#[macro_use(read_nz, write_nz)]
 extern crate atm_io_utils;
 extern crate futures_core;
 extern crate futures_io;
@@ -19,11 +18,11 @@ macro_rules! gen_byte_module {
     ($num:ty, $name:tt) => (
         use std::marker::PhantomData;
 
-        use async_codec::{AsyncDecode, DecodeError, AsyncEncode, AsyncEncodeLen};
-        use futures_core::{Poll, Never};
-        use futures_core::Async::Ready;
+        use async_codec::{AsyncDecode, AsyncEncode, AsyncEncodeLen, PollEnc, PollDec};
+        use futures_core::Never;
+        use futures_core::Async::{Ready, Pending};
         use futures_core::task::Context;
-        use futures_io::{AsyncRead, AsyncWrite, Error as FutIoErr};
+        use futures_io::{AsyncRead, AsyncWrite, Error as FutIoErr, ErrorKind};
 
         #[doc = "Create a decoder for a `"]
         #[doc = $name]
@@ -44,13 +43,18 @@ macro_rules! gen_byte_module {
             type Error = Never;
 
             fn poll_decode(
-                &mut self,
+                self,
                 cx: &mut Context,
                 reader: &mut R
-            ) -> Poll<(Option<Self::Item>, usize), DecodeError<Self::Error>> {
+            ) -> PollDec<Self::Item, Self,Self::Error> {
                 let mut byte = [0];
-                read_nz!(reader.poll_read(cx, &mut byte), $name);
-                Ok(Ready((Some(byte[0] as $num), 1)))
+
+                match reader.poll_read(cx, &mut byte) {
+                    Ok(Ready(0)) => PollDec::Errored(FutIoErr::new(ErrorKind::UnexpectedEof, $name).into()),
+                    Ok(Ready(_)) => PollDec::Done(byte[0] as $num, 1),
+                    Ok(Pending) => PollDec::Pending(self),
+                    Err(err) => PollDec::Errored(err.into())
+                }
             }
         }
 
@@ -58,7 +62,7 @@ macro_rules! gen_byte_module {
         #[doc = $name]
         #[doc = "`."]
         pub fn encode_byte<W>(num: $num) -> EncodeByte<W> {
-            EncodeByte {num: [num as u8], done: false, _w: PhantomData}
+            EncodeByte {num: [num as u8], _w: PhantomData}
         }
 
         #[doc = "Encode a `"]
@@ -66,33 +70,27 @@ macro_rules! gen_byte_module {
         #[doc = "`."]
         pub struct EncodeByte<W> {
             num: [u8; 1],
-            done: bool,
             _w: PhantomData<W>
         }
 
         impl<W: AsyncWrite> AsyncEncode<W> for EncodeByte<W> {
             fn poll_encode(
-                &mut self,
+                self,
                 cx: &mut Context,
                 writer: &mut W
-            ) -> Poll<usize, FutIoErr> {
-                if self.done {
-                    Ok(Ready(0))
-                } else {
-                    write_nz!(writer.poll_write(cx, &self.num[..]), $name);
-                    self.done = true;
-                    Ok(Ready(1))
+            ) -> PollEnc<Self> {
+                match writer.poll_write(cx, &self.num[..]) {
+                    Ok(Ready(0)) => PollEnc::Errored(FutIoErr::new(ErrorKind::WriteZero, $name).into()),
+                    Ok(Ready(_)) => PollEnc::Done(1),
+                    Ok(Pending) => PollEnc::Pending(self),
+                    Err(err) => PollEnc::Errored(err)
                 }
             }
         }
 
         impl<W: AsyncWrite> AsyncEncodeLen<W> for EncodeByte<W> {
             fn remaining_bytes(&self) -> usize {
-                if self.done {
-                    0
-                } else {
-                    1
-                }
+                1
             }
         }
     )
@@ -103,12 +101,11 @@ macro_rules! gen_module {
         use std::mem::transmute;
         use std::marker::PhantomData;
 
-        use async_codec::{AsyncDecode, DecodeError, AsyncEncode, AsyncEncodeLen};
-        use async_codec_util::decoder::{map, Map};
-        use futures_core::{Poll, Never};
-        use futures_core::Async::Ready;
+        use async_codec::{AsyncDecode, AsyncEncode, AsyncEncodeLen, PollEnc, PollDec};
+        use futures_core::Never;
+        use futures_core::Async::{Ready, Pending};
         use futures_core::task::Context;
-        use futures_io::{AsyncRead, AsyncWrite, Error as FutIoErr};
+        use futures_io::{AsyncRead, AsyncWrite, Error as FutIoErr, ErrorKind};
 
         #[doc = "Create a decoder for a `"]
         #[doc = $name]
@@ -135,17 +132,23 @@ macro_rules! gen_module {
             type Error = Never;
 
             fn poll_decode(
-                &mut self,
+                mut self,
                 cx: &mut Context,
                 reader: &mut R
-            ) -> Poll<(Option<Self::Item>, usize), DecodeError<Self::Error>> {
-                let read = read_nz!(reader.poll_read(cx, &mut self.bytes[self.offset as usize..]), $name);
-                self.offset += read as u8;
+            ) -> PollDec<Self::Item, Self, Self::Error> {
+                match reader.poll_read(cx, &mut self.bytes[self.offset as usize..]) {
+                    Ok(Ready(0)) => PollDec::Errored(FutIoErr::new(ErrorKind::UnexpectedEof, $name).into()),
+                    Ok(Ready(read)) => {
+                        self.offset += read as u8;
 
-                if self.offset < $bytes {
-                    Ok(Ready((None, read)))
-                } else {
-                    Ok(Ready((Some(unsafe { transmute::<[u8; $bytes], $num>(self.bytes) }), read)))
+                        if self.offset < $bytes {
+                            PollDec::Progress(self, read)
+                        } else {
+                            PollDec::Done(unsafe { transmute::<[u8; $bytes], $num>(self.bytes) }, read)
+                        }
+                    }
+                    Ok(Pending) => PollDec::Pending(self),
+                    Err(err) => PollDec::Errored(err.into())
                 }
             }
         }
@@ -154,24 +157,33 @@ macro_rules! gen_module {
         #[doc = $name]
         #[doc = "` in big-endian byte order."]
         pub fn decode_be<R>() -> DecodeBE<R> {
-            DecodeBE(map(decode_native(), $from_be))
+            DecodeBE(decode_native())
         }
 
         #[doc = "Decode a `"]
         #[doc = $name]
         #[doc = "` in big-endian byte order."]
-        pub struct DecodeBE<R>(Map<R, DecodeNative<R>, fn($num) -> $num>);
+        pub struct DecodeBE<R>(DecodeNative<R>);
 
         impl<R: AsyncRead> AsyncDecode<R> for DecodeBE<R> {
             type Item = $num;
             type Error = Never;
 
             fn poll_decode(
-                &mut self,
+                self,
                 cx: &mut Context,
                 reader: &mut R
-            ) -> Poll<(Option<Self::Item>, usize), DecodeError<Self::Error>> {
-                self.0.poll_decode(cx, reader)
+            ) -> PollDec<Self::Item, Self, Self::Error> {
+                match self.0.poll_decode(cx, reader) {
+                    PollDec::Done(item, read) => PollDec::Done($from_be(item), read),
+                    PollDec::Progress(inner, read) => {
+                        PollDec::Progress(DecodeBE(inner), read)
+                    }
+                    PollDec::Pending(inner) => {
+                        PollDec::Pending(DecodeBE(inner))
+                    }
+                    PollDec::Errored(err) => PollDec::Errored(err),
+                }
             }
         }
 
@@ -179,24 +191,33 @@ macro_rules! gen_module {
         #[doc = $name]
         #[doc = "` in little-endian byte order."]
         pub fn decode_le<R>() -> DecodeLE<R> {
-            DecodeLE(map(decode_native(), $from_le))
+            DecodeLE(decode_native())
         }
 
         #[doc = "Decode a `"]
         #[doc = $name]
         #[doc = "` in little-endian byte order."]
-        pub struct DecodeLE<R>(Map<R, DecodeNative<R>, fn($num) -> $num>);
+        pub struct DecodeLE<R>(DecodeNative<R>);
 
         impl<R: AsyncRead> AsyncDecode<R> for DecodeLE<R> {
             type Item = $num;
             type Error = Never;
 
             fn poll_decode(
-                &mut self,
+                self,
                 cx: &mut Context,
                 reader: &mut R
-            ) -> Poll<(Option<Self::Item>, usize), DecodeError<Self::Error>> {
-                self.0.poll_decode(cx, reader)
+            ) -> PollDec<Self::Item, Self, Self::Error> {
+                match self.0.poll_decode(cx, reader) {
+                    PollDec::Done(item, read) => PollDec::Done($from_le(item), read),
+                    PollDec::Progress(inner, read) => {
+                        PollDec::Progress(DecodeLE(inner), read)
+                    }
+                    PollDec::Pending(inner) => {
+                        PollDec::Pending(DecodeLE(inner))
+                    }
+                    PollDec::Errored(err) => PollDec::Errored(err),
+                }
             }
         }
 
@@ -222,16 +243,22 @@ macro_rules! gen_module {
 
         impl<W: AsyncWrite> AsyncEncode<W> for EncodeNative<W> {
             fn poll_encode(
-                &mut self,
+                mut self,
                 cx: &mut Context,
                 writer: &mut W
-            ) -> Poll<usize, FutIoErr> {
-                if self.offset < $bytes {
-                    let written = write_nz!(writer.poll_write(cx, &mut self.bytes[self.offset as usize..]), $name);
-                    self.offset += written as u8;
-                    Ok(Ready(written))
-                } else {
-                    Ok(Ready(0))
+            ) -> PollEnc<Self> {
+                match writer.poll_write(cx, &mut self.bytes[self.offset as usize..]) {
+                    Ok(Ready(0)) => PollEnc::Errored(FutIoErr::new(ErrorKind::WriteZero, $name).into()),
+                    Ok(Ready(written)) => {
+                        self.offset += written as u8;
+                        if self.offset < $bytes {
+                            PollEnc::Progress(self, written)
+                        } else {
+                            PollEnc::Done(written)
+                        }
+                    },
+                    Ok(Pending) => PollEnc::Pending(self),
+                    Err(err) => PollEnc::Errored(err)
                 }
             }
         }
@@ -256,11 +283,20 @@ macro_rules! gen_module {
 
         impl<W: AsyncWrite> AsyncEncode<W> for EncodeBE<W> {
             fn poll_encode(
-                &mut self,
+                self,
                 cx: &mut Context,
                 writer: &mut W
-            ) -> Poll<usize, FutIoErr> {
-                self.0.poll_encode(cx, writer)
+            ) -> PollEnc<Self> {
+                match self.0.poll_encode(cx, writer) {
+                    PollEnc::Done(written) => PollEnc::Done(written),
+                    PollEnc::Progress(inner, written) => {
+                        PollEnc::Progress(EncodeBE(inner), written)
+                    }
+                    PollEnc::Pending(inner) => {
+                        PollEnc::Pending(EncodeBE(inner))
+                    }
+                    PollEnc::Errored(err) => PollEnc::Errored(err),
+                }
             }
         }
 
@@ -284,11 +320,20 @@ macro_rules! gen_module {
 
         impl<W: AsyncWrite> AsyncEncode<W> for EncodeLE<W> {
             fn poll_encode(
-                &mut self,
+                self,
                 cx: &mut Context,
                 writer: &mut W
-            ) -> Poll<usize, FutIoErr> {
-                self.0.poll_encode(cx, writer)
+            ) -> PollEnc<Self> {
+                match self.0.poll_encode(cx, writer) {
+                    PollEnc::Done(written) => PollEnc::Done(written),
+                    PollEnc::Progress(inner, written) => {
+                        PollEnc::Progress(EncodeLE(inner), written)
+                    }
+                    PollEnc::Pending(inner) => {
+                        PollEnc::Pending(EncodeLE(inner))
+                    }
+                    PollEnc::Errored(err) => PollEnc::Errored(err),
+                }
             }
         }
 
@@ -448,7 +493,7 @@ mod tests {
                     let r = PartialRead::new(r, read_ops.drain(..));
 
                     let test_outcome = test_codec_len(r, w, $decode_native(), $encode_native(num));
-                    test_outcome.1 && test_outcome.0 == num
+                    test_outcome.1 && (test_outcome.0 == num)
                 }
             }
 

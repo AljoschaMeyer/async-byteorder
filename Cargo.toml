@@ -8,11 +8,11 @@ license = "AGPL-3.0"
 repository = "https://github.com/AljoschaMeyer/async-byteorder"
 
 [dependencies]
-async-codec = "0.1.1"
+async-codec = { git = "https://github.com/AljoschaMeyer/async-codec-rs" }
 atm-io-utils = { version = "0.2.4", features = ["quickcheck"] }
 futures-core = "0.2.0-alpha"
 futures-io = "0.2.0-alpha"
-async-codec-util = "0.1.3"
+async-codec-util = { git = "https://github.com/AljoschaMeyer/async-codec-util" }
 
 [dev-dependencies]
 async-ringbuffer = "0.3.0"

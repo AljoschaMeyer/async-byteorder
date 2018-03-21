@@ -16,8 +16,6 @@ extern crate async_ringbuffer;
 
 macro_rules! gen_byte_module {
     ($num:ty, $name:tt) => (
-        use std::marker::PhantomData;
-
         use async_codec::{AsyncDecode, AsyncEncode, AsyncEncodeLen, PollEnc, PollDec};
         use futures_core::Never;
         use futures_core::Async::{Ready, Pending};
@@ -27,22 +25,20 @@ macro_rules! gen_byte_module {
         #[doc = "Create a decoder for a `"]
         #[doc = $name]
         #[doc = "`."]
-        pub fn decode_byte<R>() -> DecodeByte<R> {
-            DecodeByte {_r: PhantomData}
+        pub fn decode_byte() -> DecodeByte {
+            DecodeByte
         }
 
         #[doc = "Decode a `"]
         #[doc = $name]
         #[doc = "`."]
-        pub struct DecodeByte<R> {
-            _r: PhantomData<R>
-        }
+        pub struct DecodeByte;
 
-        impl<R: AsyncRead> AsyncDecode<R> for DecodeByte<R> {
+        impl AsyncDecode for DecodeByte {
             type Item = $num;
             type Error = Never;
 
-            fn poll_decode(
+            fn poll_decode<R: AsyncRead>(
                 self,
                 cx: &mut Context,
                 reader: &mut R
@@ -61,20 +57,19 @@ macro_rules! gen_byte_module {
         #[doc = "Create an encoder for a `"]
         #[doc = $name]
         #[doc = "`."]
-        pub fn encode_byte<W>(num: $num) -> EncodeByte<W> {
-            EncodeByte {num: [num as u8], _w: PhantomData}
+        pub fn encode_byte(num: $num) -> EncodeByte {
+            EncodeByte {num: [num as u8]}
         }
 
         #[doc = "Encode a `"]
         #[doc = $name]
         #[doc = "`."]
-        pub struct EncodeByte<W> {
-            num: [u8; 1],
-            _w: PhantomData<W>
+        pub struct EncodeByte {
+            num: [u8; 1]
         }
 
-        impl<W: AsyncWrite> AsyncEncode<W> for EncodeByte<W> {
-            fn poll_encode(
+        impl AsyncEncode for EncodeByte {
+            fn poll_encode<W: AsyncWrite>(
                 self,
                 cx: &mut Context,
                 writer: &mut W
@@ -88,7 +83,7 @@ macro_rules! gen_byte_module {
             }
         }
 
-        impl<W: AsyncWrite> AsyncEncodeLen<W> for EncodeByte<W> {
+        impl AsyncEncodeLen for EncodeByte {
             fn remaining_bytes(&self) -> usize {
                 1
             }
@@ -99,7 +94,6 @@ macro_rules! gen_byte_module {
 macro_rules! gen_module {
     ($num:ty, $name:tt,  $bytes:expr, $from_be:path, $from_le:path) => (
         use std::mem::transmute;
-        use std::marker::PhantomData;
 
         use async_codec::{AsyncDecode, AsyncEncode, AsyncEncodeLen, PollEnc, PollDec};
         use futures_core::Never;
@@ -110,28 +104,26 @@ macro_rules! gen_module {
         #[doc = "Create a decoder for a `"]
         #[doc = $name]
         #[doc = "` in native byte order."]
-        pub fn decode_native<R>() -> DecodeNative<R> {
+        pub fn decode_native() -> DecodeNative {
             DecodeNative {
                 bytes: [0; $bytes],
                 offset: 0,
-                _r: PhantomData,
             }
         }
 
         #[doc = "Decode a `"]
         #[doc = $name]
         #[doc = "` in native byte order."]
-        pub struct DecodeNative<R> {
+        pub struct DecodeNative {
             bytes: [u8; $bytes],
             offset: u8,
-            _r: PhantomData<R>
         }
 
-        impl<R: AsyncRead> AsyncDecode<R> for DecodeNative<R> {
+        impl AsyncDecode for DecodeNative {
             type Item = $num;
             type Error = Never;
 
-            fn poll_decode(
+            fn poll_decode<R: AsyncRead>(
                 mut self,
                 cx: &mut Context,
                 reader: &mut R
@@ -156,20 +148,20 @@ macro_rules! gen_module {
         #[doc = "Create a decoder for a `"]
         #[doc = $name]
         #[doc = "` in big-endian byte order."]
-        pub fn decode_be<R>() -> DecodeBE<R> {
+        pub fn decode_be() -> DecodeBE {
             DecodeBE(decode_native())
         }
 
         #[doc = "Decode a `"]
         #[doc = $name]
         #[doc = "` in big-endian byte order."]
-        pub struct DecodeBE<R>(DecodeNative<R>);
+        pub struct DecodeBE(DecodeNative);
 
-        impl<R: AsyncRead> AsyncDecode<R> for DecodeBE<R> {
+        impl AsyncDecode for DecodeBE {
             type Item = $num;
             type Error = Never;
 
-            fn poll_decode(
+            fn poll_decode<R: AsyncRead>(
                 self,
                 cx: &mut Context,
                 reader: &mut R
@@ -190,20 +182,20 @@ macro_rules! gen_module {
         #[doc = "Create a decoder for a `"]
         #[doc = $name]
         #[doc = "` in little-endian byte order."]
-        pub fn decode_le<R>() -> DecodeLE<R> {
+        pub fn decode_le() -> DecodeLE {
             DecodeLE(decode_native())
         }
 
         #[doc = "Decode a `"]
         #[doc = $name]
         #[doc = "` in little-endian byte order."]
-        pub struct DecodeLE<R>(DecodeNative<R>);
+        pub struct DecodeLE(DecodeNative);
 
-        impl<R: AsyncRead> AsyncDecode<R> for DecodeLE<R> {
+        impl AsyncDecode for DecodeLE {
             type Item = $num;
             type Error = Never;
 
-            fn poll_decode(
+            fn poll_decode<R: AsyncRead>(
                 self,
                 cx: &mut Context,
                 reader: &mut R
@@ -224,25 +216,23 @@ macro_rules! gen_module {
         #[doc = "Create an encoder for a `"]
         #[doc = $name]
         #[doc = "` in native byte order."]
-        pub fn encode_native<W>(num: $num) -> EncodeNative<W> {
+        pub fn encode_native(num: $num) -> EncodeNative {
             EncodeNative {
                 bytes: unsafe { transmute::<$num, [u8; $bytes]>(num) },
                 offset: 0,
-                _w: PhantomData,
             }
         }
 
         #[doc = "Encode a `"]
         #[doc = $name]
         #[doc = "` in native byte order."]
-        pub struct EncodeNative<W> {
+        pub struct EncodeNative {
             bytes: [u8; $bytes],
             offset: u8,
-            _w: PhantomData<W>
         }
 
-        impl<W: AsyncWrite> AsyncEncode<W> for EncodeNative<W> {
-            fn poll_encode(
+        impl AsyncEncode for EncodeNative {
+            fn poll_encode<W: AsyncWrite>(
                 mut self,
                 cx: &mut Context,
                 writer: &mut W
@@ -263,7 +253,7 @@ macro_rules! gen_module {
             }
         }
 
-        impl<W: AsyncWrite> AsyncEncodeLen<W> for EncodeNative<W> {
+        impl AsyncEncodeLen for EncodeNative {
             fn remaining_bytes(&self) -> usize {
                 ($bytes - self.offset) as usize
             }
@@ -272,17 +262,17 @@ macro_rules! gen_module {
         #[doc = "Create an encoder for a `"]
         #[doc = $name]
         #[doc = "` in big-endian byte order."]
-        pub fn encode_be<W>(num: $num) -> EncodeBE<W> {
+        pub fn encode_be(num: $num) -> EncodeBE {
             EncodeBE(encode_native(num.to_be()))
         }
 
         #[doc = "Encode a `"]
         #[doc = $name]
         #[doc = "` in big-endian byte order."]
-        pub struct EncodeBE<W>(EncodeNative<W>);
+        pub struct EncodeBE(EncodeNative);
 
-        impl<W: AsyncWrite> AsyncEncode<W> for EncodeBE<W> {
-            fn poll_encode(
+        impl AsyncEncode for EncodeBE {
+            fn poll_encode<W: AsyncWrite>(
                 self,
                 cx: &mut Context,
                 writer: &mut W
@@ -300,7 +290,7 @@ macro_rules! gen_module {
             }
         }
 
-        impl<W: AsyncWrite> AsyncEncodeLen<W> for EncodeBE<W> {
+        impl AsyncEncodeLen for EncodeBE {
             fn remaining_bytes(&self) -> usize {
                 self.0.remaining_bytes()
             }
@@ -309,17 +299,17 @@ macro_rules! gen_module {
         #[doc = "Create an encoder for a `"]
         #[doc = $name]
         #[doc = "` in little-endian byte order."]
-        pub fn encode_le<W>(num: $num) -> EncodeLE<W> {
+        pub fn encode_le(num: $num) -> EncodeLE {
             EncodeLE(encode_native(num.to_le()))
         }
 
         #[doc = "Encode a `"]
         #[doc = $name]
         #[doc = "` in little-endian byte order."]
-        pub struct EncodeLE<W>(EncodeNative<W>);
+        pub struct EncodeLE(EncodeNative);
 
-        impl<W: AsyncWrite> AsyncEncode<W> for EncodeLE<W> {
-            fn poll_encode(
+        impl AsyncEncode for EncodeLE {
+            fn poll_encode<W: AsyncWrite>(
                 self,
                 cx: &mut Context,
                 writer: &mut W
@@ -337,7 +327,7 @@ macro_rules! gen_module {
             }
         }
 
-        impl<W: AsyncWrite> AsyncEncodeLen<W> for EncodeLE<W> {
+        impl AsyncEncodeLen for EncodeLE {
             fn remaining_bytes(&self) -> usize {
                 self.0.remaining_bytes()
             }
